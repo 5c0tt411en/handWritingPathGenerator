@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>手書き絵テンプレート生成</title>
+    <style>
+        body {
+            font-family: Arial;
+            padding: 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        #info {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #0056b3; }
+        canvas {
+            border: 1px solid #ddd;
+            margin: 20px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .controls {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .controls label {
+            display: block;
+            margin: 10px 0;
+        }
+        .preview {
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>手書き絵テンプレート生成ツール</h1>
+
+    <div id="info">
+        <strong>📄 A4サイズ印刷用テンプレート</strong><br>
+        150mm x 150mmの描画枠を中央に配置し、四隅にARマーカー（ID 0-3）を配置します。<br>
+        スキャン後、マーカーを検出して傾き補正とパース補正を行い、枠内の手書き絵をSVG化します。
+    </div>
+
+    <div class="controls">
+        <h3>設定</h3>
+        <label>
+            用紙サイズ:
+            <select id="paperSize">
+                <option value="A4">A4 (210mm x 297mm)</option>
+                <option value="Letter">Letter (8.5" x 11")</option>
+            </select>
+        </label>
+        <label>
+            描画枠サイズ:
+            <input type="number" id="frameSize" value="150" min="100" max="200" step="10"> mm
+        </label>
+        <label>
+            マーカーサイズ:
+            <input type="number" id="markerSize" value="20" min="15" max="30" step="5"> mm
+        </label>
+        <label>
+            余白:
+            <input type="number" id="margin" value="15" min="10" max="30" step="5"> mm
+        </label>
+    </div>
+
+    <button onclick="generateTemplate()">テンプレート生成</button>
+    <button onclick="downloadPDF()">PDFダウンロード</button>
+    <button onclick="downloadPNG()">PNGダウンロード（300dpi）</button>
+
+    <div class="preview">
+        <h3>プレビュー</h3>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script src="cv.js"></script>
+    <script src="aruco2.js"></script>
+    <script>
+        const dict = new AR.Dictionary('ARUCO');
+
+        // mm to pixel conversion (300 DPI = 11.811 pixels per mm)
+        const DPI = 300;
+        const MM_TO_PX = DPI / 25.4;
+
+        function generateTemplate() {
+            const paperSize = document.getElementById('paperSize').value;
+            const frameSize = parseFloat(document.getElementById('frameSize').value);
+            const markerSize = parseFloat(document.getElementById('markerSize').value);
+            const margin = parseFloat(document.getElementById('margin').value);
+
+            // 用紙サイズ（mm）
+            let paperWidth, paperHeight;
+            if (paperSize === 'A4') {
+                paperWidth = 210;
+                paperHeight = 297;
+            } else {
+                paperWidth = 215.9;  // 8.5 inches
+                paperHeight = 279.4; // 11 inches
+            }
+
+            // ピクセルに変換
+            const canvasWidth = Math.round(paperWidth * MM_TO_PX);
+            const canvasHeight = Math.round(paperHeight * MM_TO_PX);
+            const frameSizePx = Math.round(frameSize * MM_TO_PX);
+            const markerSizePx = Math.round(markerSize * MM_TO_PX);
+            const marginPx = Math.round(margin * MM_TO_PX);
+
+            const canvas = document.getElementById('canvas');
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+            const ctx = canvas.getContext('2d');
+
+            // 白背景
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+            // 中央に描画枠を配置
+            const frameX = (canvasWidth - frameSizePx) / 2;
+            const frameY = (canvasHeight - frameSizePx) / 2;
+
+            // 描画枠（黒線）
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(frameX, frameY, frameSizePx, frameSizePx);
+
+            // 枠内にガイド（薄いグリッド）
+            ctx.strokeStyle = '#e0e0e0';
+            ctx.lineWidth = 1;
+            const gridSize = frameSizePx / 10;
+            for (let i = 1; i < 10; i++) {
+                // 縦線
+                ctx.beginPath();
+                ctx.moveTo(frameX + i * gridSize, frameY);
+                ctx.lineTo(frameX + i * gridSize, frameY + frameSizePx);
+                ctx.stroke();
+                // 横線
+                ctx.beginPath();
+                ctx.moveTo(frameX, frameY + i * gridSize);
+                ctx.lineTo(frameX + frameSizePx, frameY + i * gridSize);
+                ctx.stroke();
+            }
+
+            // 四隅にARマーカーを配置
+            // マーカーの位置（枠から指定した余白分離す）
+            const positions = [
+                { id: 0, x: frameX - marginPx - markerSizePx, y: frameY - marginPx - markerSizePx, label: 'TL' }, // 左上
+                { id: 1, x: frameX + frameSizePx + marginPx, y: frameY - marginPx - markerSizePx, label: 'TR' }, // 右上
+                { id: 2, x: frameX + frameSizePx + marginPx, y: frameY + frameSizePx + marginPx, label: 'BR' }, // 右下
+                { id: 3, x: frameX - marginPx - markerSizePx, y: frameY + frameSizePx + marginPx, label: 'BL' }  // 左下
+            ];
+
+            // ARマーカーを描画
+            positions.forEach(pos => {
+                drawARMarker(ctx, pos.id, pos.x, pos.y, markerSizePx);
+
+                // マーカーIDを表示
+                ctx.fillStyle = '#666666';
+                ctx.font = 'bold 12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`ID:${pos.id}`, pos.x + markerSizePx / 2, pos.y + markerSizePx + 15);
+            });
+
+            // タイトルとガイド
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('手書き絵テンプレート', canvasWidth / 2, 40);
+
+            ctx.font = '14px Arial';
+            ctx.fillText(`描画エリア: ${frameSize}mm x ${frameSize}mm`, canvasWidth / 2, 65);
+            ctx.fillText('この枠内に絵を描いてください', canvasWidth / 2, frameY - 30);
+
+            // 下部に注意事項
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'left';
+            const instructions = [
+                '【使い方】',
+                '1. このテンプレートを印刷してください',
+                '2. 中央の枠内に絵を描いてください',
+                '3. スキャンまたは写真撮影してください',
+                '4. 画像をアップロードしてSVG化してください'
+            ];
+            instructions.forEach((text, i) => {
+                ctx.fillText(text, 40, canvasHeight - 80 + i * 18);
+            });
+
+            console.log('テンプレート生成完了');
+            console.log(`用紙: ${paperWidth}mm x ${paperHeight}mm`);
+            console.log(`キャンバス: ${canvasWidth}px x ${canvasHeight}px`);
+            console.log(`描画枠: ${frameSizePx}px (${frameSize}mm)`);
+        }
+
+        function drawARMarker(ctx, id, x, y, size) {
+            // SVGからマーカーを生成
+            const svgString = dict.generateSVG(id);
+
+            // SVGをImageに変換して描画
+            const img = new Image();
+            const svgBlob = new Blob([svgString], {type: 'image/svg+xml'});
+            const url = URL.createObjectURL(svgBlob);
+
+            img.onload = function() {
+                ctx.drawImage(img, x, y, size, size);
+                URL.revokeObjectURL(url);
+            };
+            img.src = url;
+        }
+
+        function downloadPNG() {
+            const canvas = document.getElementById('canvas');
+            if (canvas.width === 0) {
+                alert('まずテンプレートを生成してください');
+                return;
+            }
+
+            canvas.toBlob(function(blob) {
+                const link = document.createElement('a');
+                link.download = 'handwriting-template-300dpi.png';
+                link.href = URL.createObjectURL(blob);
+                link.click();
+            });
+        }
+
+        function downloadPDF() {
+            alert('PDF出力機能は別途実装が必要です。\n現在はPNGをダウンロードして、画像編集ソフトでPDFに変換してください。');
+        }
+
+        // 初期表示
+        window.onload = function() {
+            // マーカーが読み込まれるのを待つ
+            setTimeout(generateTemplate, 100);
+        };
+    </script>
+</body>
+</html>

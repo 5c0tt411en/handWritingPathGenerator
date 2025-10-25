@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>手書き絵 SVG変換ツール</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .info-box {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .upload-section {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            border-radius: 8px;
+        }
+        .preview-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        .preview-box {
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 8px;
+            background: #f9f9f9;
+        }
+        .preview-box h3 {
+            margin-top: 0;
+        }
+        canvas {
+            max-width: 100%;
+            border: 1px solid #333;
+            background: white;
+        }
+        #svgOutput {
+            width: 100%;
+            height: 400px;
+            border: 1px solid #333;
+            background: white;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .status.loading {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .controls {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .controls label {
+            display: inline-block;
+            margin: 5px 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📝 手書き絵 SVG変換ツール</h1>
+
+        <div class="info-box">
+            <strong>使い方:</strong><br>
+            1. <a href="template-generator.html" target="_blank">テンプレート生成ツール</a>でテンプレートを印刷<br>
+            2. 150mm x 150mmの枠内に絵を描く<br>
+            3. スキャンまたは写真撮影<br>
+            4. 画像をアップロードして自動的にSVG化
+        </div>
+
+        <div id="status" class="status success">画像をアップロードしてください</div>
+
+        <div class="upload-section">
+            <h2>スキャン画像をアップロード</h2>
+            <input type="file" id="imageInput" accept="image/*">
+            <p>四隅にARマーカー（ID 0-3）が配置された画像をアップロードしてください</p>
+        </div>
+
+        <div class="controls">
+            <h3>パラメータ調整</h3>
+            <label>
+                切り取り余白:
+                <input type="number" id="insetMargin" min="0" max="30" value="15" step="1">
+                mm (マーカーから内側への余白)
+            </label>
+            <br>
+            <label>
+                二値化閾値:
+                <input type="range" id="threshold" min="0" max="255" value="128" step="1">
+                <span id="thresholdValue">128</span>
+            </label>
+            <label>
+                <input type="checkbox" id="invertColors">
+                白黒反転
+            </label>
+            <button onclick="reprocess()">再処理</button>
+        </div>
+
+        <div class="preview-section">
+            <div class="preview-box">
+                <h3>1. 元画像 & マーカー検出</h3>
+                <canvas id="originalCanvas"></canvas>
+            </div>
+            <div class="preview-box">
+                <h3>2. 補正後の描画エリア</h3>
+                <canvas id="correctedCanvas"></canvas>
+            </div>
+            <div class="preview-box">
+                <h3>3. 二値化画像</h3>
+                <canvas id="binaryCanvas"></canvas>
+            </div>
+            <div class="preview-box">
+                <h3>4. SVG出力</h3>
+                <svg id="svgOutput"></svg>
+            </div>
+        </div>
+
+        <div>
+            <button id="downloadSvg" disabled>SVGをダウンロード</button>
+            <button id="downloadPng" disabled>補正画像をダウンロード</button>
+            <button id="copySvg" disabled>SVGコードをコピー</button>
+        </div>
+    </div>
+
+    <script src="cv.js"></script>
+    <script src="aruco2.js"></script>
+    <script>
+        window.addEventListener('load', function() {
+            if (typeof AR === 'undefined') {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = 'エラー: ArUcoライブラリの読み込みに失敗しました';
+            }
+        });
+
+        // 閾値スライダーの値を表示
+        document.getElementById('threshold').addEventListener('input', function(e) {
+            document.getElementById('thresholdValue').textContent = e.target.value;
+        });
+    </script>
+    <script src="handwriting-processor.js"></script>
+</body>
+</html>
