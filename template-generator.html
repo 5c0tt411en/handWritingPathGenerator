@@ -71,11 +71,11 @@
         </label>
         <label>
             マーカーサイズ:
-            <input type="number" id="markerSize" value="20" min="15" max="30" step="5"> mm
+            <input type="number" id="markerSize" value="30" min="15" max="40" step="5"> mm
         </label>
         <label>
             余白:
-            <input type="number" id="margin" value="15" min="10" max="30" step="5"> mm
+            <input type="number" id="margin" value="0" min="0" max="30" step="5"> mm
         </label>
     </div>
 
@@ -138,22 +138,6 @@
             ctx.lineWidth = 2;
             ctx.strokeRect(frameX, frameY, frameSizePx, frameSizePx);
 
-            // 枠内にガイド（薄いグリッド）
-            ctx.strokeStyle = '#e0e0e0';
-            ctx.lineWidth = 1;
-            const gridSize = frameSizePx / 10;
-            for (let i = 1; i < 10; i++) {
-                // 縦線
-                ctx.beginPath();
-                ctx.moveTo(frameX + i * gridSize, frameY);
-                ctx.lineTo(frameX + i * gridSize, frameY + frameSizePx);
-                ctx.stroke();
-                // 横線
-                ctx.beginPath();
-                ctx.moveTo(frameX, frameY + i * gridSize);
-                ctx.lineTo(frameX + frameSizePx, frameY + i * gridSize);
-                ctx.stroke();
-            }
 
             // 四隅にARマーカーを配置
             // マーカーの位置（枠から指定した余白分離す）
@@ -167,37 +151,35 @@
             // ARマーカーを描画
             positions.forEach(pos => {
                 drawARMarker(ctx, pos.id, pos.x, pos.y, markerSizePx);
-
-                // マーカーIDを表示
-                ctx.fillStyle = '#666666';
-                ctx.font = 'bold 12px Arial';
-                ctx.textAlign = 'center';
-                ctx.fillText(`ID:${pos.id}`, pos.x + markerSizePx / 2, pos.y + markerSizePx + 15);
             });
 
-            // タイトルとガイド
+            // ガイド
             ctx.fillStyle = '#000000';
-            ctx.font = 'bold 24px Arial';
+
+            // 枠上のガイド
+            ctx.font = '62px Arial';
             ctx.textAlign = 'center';
-            ctx.fillText('手書き絵テンプレート', canvasWidth / 2, 40);
+            ctx.fillText('したのしかくのなかに じぶんのかおを かいてね', canvasWidth / 2, frameY - 80);
 
-            ctx.font = '14px Arial';
-            ctx.fillText(`描画エリア: ${frameSize}mm x ${frameSize}mm`, canvasWidth / 2, 65);
-            ctx.fillText('この枠内に絵を描いてください', canvasWidth / 2, frameY - 30);
+            // 紙の右上に名前を書くゾーンを作成
+            const nameZoneWidth = Math.round(100 * MM_TO_PX); // 100mm幅
+            const nameZoneHeight = Math.round(22.5 * MM_TO_PX); // 22.5mm高さ (15mm × 1.5)
+            const nameZoneX = canvasWidth - nameZoneWidth - Math.round(10 * MM_TO_PX); // 右端から10mm
+            const nameZoneY = Math.round(10 * MM_TO_PX); // 上端から10mm
 
-            // 下部に注意事項
-            ctx.font = '12px Arial';
+            // 名前ゾーンの枠線
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(nameZoneX, nameZoneY, nameZoneWidth, nameZoneHeight);
+
+            // 「なまえ」テキストを左側に横書きで配置
+            ctx.fillStyle = '#000000';
+            ctx.font = '32px Arial';
             ctx.textAlign = 'left';
-            const instructions = [
-                '【使い方】',
-                '1. このテンプレートを印刷してください',
-                '2. 中央の枠内に絵を描いてください',
-                '3. スキャンまたは写真撮影してください',
-                '4. 画像をアップロードしてSVG化してください'
-            ];
-            instructions.forEach((text, i) => {
-                ctx.fillText(text, 40, canvasHeight - 80 + i * 18);
-            });
+            ctx.textBaseline = 'top';
+            const nameLabelX = nameZoneX + 10;
+            const nameLabelY = nameZoneY + 10;
+            ctx.fillText('なまえ', nameLabelX, nameLabelY);
 
             console.log('テンプレート生成完了');
             console.log(`用紙: ${paperWidth}mm x ${paperHeight}mm`);

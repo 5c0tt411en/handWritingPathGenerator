@@ -122,14 +122,14 @@
             <h3>パラメータ調整</h3>
             <label>
                 切り取り余白:
-                <input type="number" id="insetMargin" min="0" max="30" value="15" step="1">
+                <input type="number" id="insetMargin" min="0" max="30" value="3.5" step="0.5">
                 mm (マーカーから内側への余白)
             </label>
             <br>
             <label>
                 二値化閾値:
-                <input type="range" id="threshold" min="0" max="255" value="128" step="1">
-                <span id="thresholdValue">128</span>
+                <input type="range" id="threshold" min="0" max="255" value="225" step="1">
+                <span id="thresholdValue">225</span>
             </label>
             <label>
                 <input type="checkbox" id="invertColors">
@@ -152,15 +152,13 @@
                 <canvas id="binaryCanvas"></canvas>
             </div>
             <div class="preview-box">
-                <h3>4. SVG出力</h3>
-                <svg id="svgOutput"></svg>
+                <h3>4. アルファ付きPNG（透明背景）</h3>
+                <canvas id="alphaCanvas" style="background: repeating-conic-gradient(#ccc 0% 25%, white 0% 50%) 50% / 20px 20px;"></canvas>
             </div>
         </div>
 
         <div>
-            <button id="downloadSvg" disabled>SVGをダウンロード</button>
-            <button id="downloadPng" disabled>補正画像をダウンロード</button>
-            <button id="copySvg" disabled>SVGコードをコピー</button>
+            <button id="downloadPng" disabled>アルファ付きPNGをダウンロード</button>
         </div>
     </div>
 

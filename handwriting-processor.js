@@ -153,7 +153,7 @@ function processImage(img) {
         ctx.stroke();
 
         // 3. パース補正（ホモグラフィ変換）
-        const outputSize = 800; // 出力画像のサイズ
+        const outputSize = 4096; // 出力画像のサイズ
         const corrected = perspectiveTransform(
             img,
             drawingAreaCorners,
@@ -278,6 +278,84 @@ function applyHomography(H, x, y, inverse) {
     return { x: srcX, y: srcY };
 }
 
+// ノイズ除去（小さな連結成分を削除）
+function removeSmallNoise(binaryData) {
+    const width = binaryData.width;
+    const height = binaryData.height;
+
+    // 連結成分のサイズ閾値（ピクセル数）
+    // 4096x4096の解像度で、約0.5mm x 0.5mm以下の点を除去
+    // 4096px / 150mm ≈ 27.31 px/mm なので、0.5mm ≈ 14px
+    // 14px x 14px = 196ピクセル程度を閾値とする
+    const minComponentSize = 200;
+
+    const labels = new Int32Array(width * height);
+    let labelCount = 0;
+    const componentSizes = new Map();
+
+    // 8方向の隣接ピクセル
+    const dx = [-1, 0, 1, -1, 1, -1, 0, 1];
+    const dy = [-1, -1, -1, 0, 0, 1, 1, 1];
+
+    // Flood fillで連結成分をラベリング
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+            const pixelIdx = idx * 4;
+            const isBlack = binaryData.data[pixelIdx] === 0;
+
+            if (isBlack && labels[idx] === 0) {
+                labelCount++;
+                let size = 0;
+                const stack = [{x, y}];
+
+                while (stack.length > 0) {
+                    const pos = stack.pop();
+                    const px = pos.x;
+                    const py = pos.y;
+
+                    if (px < 0 || px >= width || py < 0 || py >= height) continue;
+
+                    const pIdx = py * width + px;
+                    const pPixelIdx = pIdx * 4;
+
+                    if (labels[pIdx] !== 0 || binaryData.data[pPixelIdx] !== 0) continue;
+
+                    labels[pIdx] = labelCount;
+                    size++;
+
+                    // 8近傍を探索
+                    for (let i = 0; i < 8; i++) {
+                        stack.push({x: px + dx[i], y: py + dy[i]});
+                    }
+                }
+
+                componentSizes.set(labelCount, size);
+            }
+        }
+    }
+
+    console.log(`連結成分数: ${labelCount}`);
+
+    // 小さな成分を白に変換
+    let removedCount = 0;
+    for (let i = 0; i < labels.length; i++) {
+        const label = labels[i];
+        if (label > 0) {
+            const size = componentSizes.get(label);
+            if (size < minComponentSize) {
+                const pixelIdx = i * 4;
+                binaryData.data[pixelIdx] = 255;
+                binaryData.data[pixelIdx + 1] = 255;
+                binaryData.data[pixelIdx + 2] = 255;
+                removedCount++;
+            }
+        }
+    }
+
+    console.log(`ノイズ除去: ${removedCount}ピクセルを削除`);
+}
+
 // 二値化とパストレース
 function binarizeAndTracePath(imageData) {
     const statusEl = document.getElementById('status');
@@ -308,6 +386,10 @@ function binarizeAndTracePath(imageData) {
         binaryData.data[i + 3] = 255;
     }
 
+    // ノイズ除去
+    statusEl.textContent = 'ノイズ除去中...';
+    removeSmallNoise(binaryData);
+
     // 二値化画像を表示
     const binaryCanvas = document.getElementById('binaryCanvas');
     binaryCanvas.width = width;
@@ -315,24 +397,168 @@ function binarizeAndTracePath(imageData) {
     const binaryCtx = binaryCanvas.getContext('2d');
     binaryCtx.putImageData(binaryData, 0, 0);
 
-    // SVG生成を非同期で実行
-    statusEl.textContent = '輪郭をトレース中...（少々お待ちください）';
+    // アルファ付きPNGを生成
+    statusEl.className = 'status loading';
+    statusEl.textContent = 'アルファ付きPNGを生成中...';
 
     setTimeout(() => {
         try {
-            generateSVG(binaryData);
+            generateAlphaPNG(binaryData);
             statusEl.className = 'status success';
-            statusEl.textContent = '✓ SVG変換が完了しました！';
+            statusEl.textContent = '✓ PNG変換が完了しました！';
         } catch (error) {
-            console.error(error);
+            console.error('PNG生成エラー:', error);
             statusEl.className = 'status error';
             statusEl.textContent = `エラー: ${error.message}`;
         }
     }, 100);
 }
 
-// SVG生成（輪郭トレース版）
-function generateSVG(binaryData) {
+// アルファ付きPNG生成
+function generateAlphaPNG(binaryData) {
+    const width = binaryData.width;
+    const height = binaryData.height;
+
+    // アルファチャンネル付きの画像データを作成
+    const alphaImageData = new ImageData(width, height);
+
+    for (let i = 0; i < binaryData.data.length; i += 4) {
+        const isBlack = binaryData.data[i] === 0;
+
+        if (isBlack) {
+            // 黒い部分 → 黒色、不透明
+            alphaImageData.data[i] = 0;       // R
+            alphaImageData.data[i + 1] = 0;   // G
+            alphaImageData.data[i + 2] = 0;   // B
+            alphaImageData.data[i + 3] = 255; // A (不透明)
+        } else {
+            // 白い部分 → 透明
+            alphaImageData.data[i] = 0;       // R
+            alphaImageData.data[i + 1] = 0;   // G
+            alphaImageData.data[i + 2] = 0;   // B
+            alphaImageData.data[i + 3] = 0;   // A (透明)
+        }
+    }
+
+    // バウンディングボックスを検出
+    const bbox = findBoundingBox(binaryData);
+    console.log('バウンディングボックス:', bbox);
+
+    if (!bbox) {
+        console.warn('黒いピクセルが見つかりませんでした');
+        // 全体を表示
+        const canvas = document.getElementById('alphaCanvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData(alphaImageData, 0, 0);
+        document.getElementById('downloadPng').disabled = false;
+        return;
+    }
+
+    // 正方形に拡張 + 5mmの余白を追加
+    const croppedImageData = cropToSquareWithMargin(alphaImageData, bbox, 5);
+
+    // キャンバスに描画
+    const canvas = document.getElementById('alphaCanvas');
+    canvas.width = croppedImageData.width;
+    canvas.height = croppedImageData.height;
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(croppedImageData, 0, 0);
+
+    // ダウンロードボタンを有効化
+    document.getElementById('downloadPng').disabled = false;
+
+    console.log(`アルファ付きPNG生成完了: ${croppedImageData.width}x${croppedImageData.height}px`);
+}
+
+// バウンディングボックスを検出（黒いピクセルの範囲）
+function findBoundingBox(imageData) {
+    const width = imageData.width;
+    const height = imageData.height;
+
+    let minX = width, minY = height, maxX = 0, maxY = 0;
+    let found = false;
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = (y * width + x) * 4;
+            const isBlack = imageData.data[idx] === 0;
+
+            if (isBlack) {
+                found = true;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+
+    if (!found) return null;
+
+    return { minX, minY, maxX, maxY };
+}
+
+// 正方形に拡張してマージンを追加してトリミング
+function cropToSquareWithMargin(imageData, bbox, marginMm) {
+    const width = imageData.width;
+    const height = imageData.height;
+
+    // バウンディングボックスのサイズ
+    const bboxWidth = bbox.maxX - bbox.minX + 1;
+    const bboxHeight = bbox.maxY - bbox.minY + 1;
+
+    // 正方形にするため、大きい方に合わせる
+    const maxSize = Math.max(bboxWidth, bboxHeight);
+
+    // 中心を計算
+    const centerX = (bbox.minX + bbox.maxX) / 2;
+    const centerY = (bbox.minY + bbox.maxY) / 2;
+
+    // mmをピクセルに変換（元画像が4096pxで150mmと仮定）
+    const mmToPx = 4096 / 150; // 約27.31 px/mm
+    const marginPx = Math.round(marginMm * mmToPx);
+
+    // 正方形 + マージンのサイズ
+    const finalSize = maxSize + marginPx * 2;
+
+    // トリミング範囲を計算（中心からの正方形）
+    const cropMinX = Math.max(0, Math.round(centerX - finalSize / 2));
+    const cropMinY = Math.max(0, Math.round(centerY - finalSize / 2));
+    const cropMaxX = Math.min(width, cropMinX + finalSize);
+    const cropMaxY = Math.min(height, cropMinY + finalSize);
+
+    const cropWidth = cropMaxX - cropMinX;
+    const cropHeight = cropMaxY - cropMinY;
+
+    console.log(`トリミング: ${cropWidth}x${cropHeight}px (余白: ${marginMm}mm = ${marginPx}px)`);
+
+    // 新しい画像データを作成
+    const croppedData = new ImageData(cropWidth, cropHeight);
+
+    for (let y = 0; y < cropHeight; y++) {
+        for (let x = 0; x < cropWidth; x++) {
+            const srcX = cropMinX + x;
+            const srcY = cropMinY + y;
+
+            if (srcX >= 0 && srcX < width && srcY >= 0 && srcY < height) {
+                const srcIdx = (srcY * width + srcX) * 4;
+                const dstIdx = (y * cropWidth + x) * 4;
+
+                croppedData.data[dstIdx] = imageData.data[srcIdx];
+                croppedData.data[dstIdx + 1] = imageData.data[srcIdx + 1];
+                croppedData.data[dstIdx + 2] = imageData.data[srcIdx + 2];
+                croppedData.data[dstIdx + 3] = imageData.data[srcIdx + 3];
+            }
+        }
+    }
+
+    return croppedData;
+}
+
+// 旧SVG生成関数（削除予定）
+function generateSVG_old(binaryData) {
     const width = binaryData.width;
     const height = binaryData.height;
 
@@ -340,30 +566,168 @@ function generateSVG(binaryData) {
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 
-    // 二値画像から輪郭を抽出
-    console.log('輪郭抽出を開始...');
+    console.log('輪郭を抽出中...');
+
+    // 輪郭抽出
     const contours = traceContours(binaryData);
     console.log(`${contours.length}個の輪郭を検出`);
 
-    // 輪郭を滑らかなパスに変換
-    // 全ての輪郭を1つのパスにまとめる（fill-rule="evenodd"で穴を表現）
-    let combinedPath = '';
-    contours.forEach((contour, i) => {
-        if (contour.length < 3) return; // 3点未満は無視
+    if (contours.length === 0) {
+        console.warn('輪郭が検出されませんでした');
+        svg.innerHTML = '';
+        return false;
+    }
 
-        const smoothed = smoothContour(contour);
-        const pathData = contourToPath(smoothed);
-        combinedPath += pathData + ' ';
+    // 輪郭を分類（面積の符号で外側/内側を判定）
+    const processedContours = contours.map((contour, index) => {
+        if (contour.length < 10) {
+            return null;
+        }
+
+        const signedArea = calculateSignedArea(contour);
+        const area = Math.abs(signedArea);
+        const perimeter = contour.length;
+        const avgWidth = (area / perimeter) * 2;
+
+        console.log(`輪郭${index}: 面積=${area.toFixed(0)}, 符号付き面積=${signedArea.toFixed(0)}, 周長=${perimeter.toFixed(0)}, 推定幅=${avgWidth.toFixed(1)}px`);
+
+        return {
+            contour: contour,
+            area: area,
+            signedArea: signedArea,
+            avgWidth: avgWidth,
+            isOuter: signedArea > 0  // 正=外側（時計回り）、負=内側（反時計回り）
+        };
+    }).filter(c => c !== null);
+
+    // 面積でソート（大きい順）
+    processedContours.sort((a, b) => b.area - a.area);
+
+    console.log(`処理対象: ${processedContours.length}個`);
+
+    // グループ化: 外側の輪郭とその内側の穴をまとめる
+    const groups = [];
+    processedContours.forEach((item, index) => {
+        if (item.isOuter) {
+            // 外側の輪郭 → 新しいグループを作成
+            groups.push({
+                outer: item,
+                holes: [],
+                avgWidth: item.avgWidth
+            });
+        } else {
+            // 内側の輪郭（穴）→ 最も近い外側の輪郭に追加
+            // 簡易的に最初のグループに追加
+            if (groups.length > 0) {
+                groups[groups.length - 1].holes.push(item);
+            }
+        }
     });
 
-    if (combinedPath) {
-        svg.innerHTML = `<path d="${combinedPath}" fill="black" fill-rule="evenodd"/>`;
+    console.log(`グループ数: ${groups.length}`);
+
+    // SVGを生成
+    let svgContent = '';
+
+    groups.forEach((group, gindex) => {
+        // 簡略化の許容誤差を自動調整（線の幅に応じて）
+        const tolerance = Math.max(0.5, Math.min(2.0, group.avgWidth * 0.3));
+
+        // 外側の輪郭を滑らかに
+        const outerSmoothed = smoothContour(group.outer.contour, tolerance);
+
+        if (outerSmoothed.length < 3) {
+            console.log(`グループ${gindex}: スキップ（点数不足）`);
+            return;
+        }
+
+        // fill-rule="evenodd"で穴を表現
+        let combinedPath = contourToClosedPath(outerSmoothed);
+
+        // 穴を追加
+        group.holes.forEach((hole, hindex) => {
+            const holeTolerance = Math.max(0.5, Math.min(2.0, hole.avgWidth * 0.3));
+            const holeSmoothed = smoothContour(hole.contour, holeTolerance);
+            if (holeSmoothed.length >= 3) {
+                combinedPath += ' ' + contourToClosedPath(holeSmoothed);
+                console.log(`  穴${hindex}: 追加（${holeSmoothed.length}点）`);
+            }
+        });
+
+        svgContent += `<path d="${combinedPath}" fill="black" fill-rule="evenodd" stroke="none"/>\n`;
+        console.log(`グループ${gindex}: パス生成成功（外側${outerSmoothed.length}点、穴${group.holes.length}個、許容誤差=${tolerance.toFixed(2)}）`);
+    });
+
+    if (svgContent) {
+        svg.innerHTML = svgContent;
+        return true;
     } else {
+        console.warn('パスが生成されませんでした');
         svg.innerHTML = '';
+        return false;
     }
 }
 
-// 輪郭抽出（Marching Squares アルゴリズム）
+// 面積計算（絶対値）
+function calculateArea(contour) {
+    return Math.abs(calculateSignedArea(contour));
+}
+
+// 符号付き面積計算（時計回りか反時計回りか判定）
+function calculateSignedArea(contour) {
+    let area = 0;
+    for (let i = 0; i < contour.length; i++) {
+        const j = (i + 1) % contour.length;
+        area += contour[i].x * contour[j].y;
+        area -= contour[j].x * contour[i].y;
+    }
+    return area / 2;
+}
+
+// 輪郭を閉じたパスに変換（滑らかなベジェ曲線）
+function contourToClosedPath(contour) {
+    if (contour.length < 3) return '';
+
+    const points = contour;
+    let path = `M ${points[0].x.toFixed(2)},${points[0].y.toFixed(2)}`;
+
+    if (points.length === 3) {
+        // 3点の場合は2次ベジェ曲線
+        const midX = (points[0].x + points[1].x + points[2].x) / 3;
+        const midY = (points[0].y + points[1].y + points[2].y) / 3;
+        path += ` Q ${points[1].x.toFixed(2)},${points[1].y.toFixed(2)} ${points[2].x.toFixed(2)},${points[2].y.toFixed(2)}`;
+    } else if (points.length === 4) {
+        // 4点の場合
+        path += ` C ${points[1].x.toFixed(2)},${points[1].y.toFixed(2)} ${points[2].x.toFixed(2)},${points[2].y.toFixed(2)} ${points[3].x.toFixed(2)},${points[3].y.toFixed(2)}`;
+    } else {
+        // 5点以上の場合は滑らかなCatmull-Romスプライン
+        const tension = 0.4; // 張力（高いほど角が丸くなる）
+
+        for (let i = 0; i < points.length; i++) {
+            const p0 = points[(i - 1 + points.length) % points.length];
+            const p1 = points[i];
+            const p2 = points[(i + 1) % points.length];
+            const p3 = points[(i + 2) % points.length];
+
+            // Catmull-Romスプラインの制御点を計算
+            const cp1x = p1.x + (p2.x - p0.x) / 6 * tension;
+            const cp1y = p1.y + (p2.y - p0.y) / 6 * tension;
+            const cp2x = p2.x - (p3.x - p1.x) / 6 * tension;
+            const cp2y = p2.y - (p3.y - p1.y) / 6 * tension;
+
+            if (i === 0) {
+                path += ` C ${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2.x.toFixed(2)},${p2.y.toFixed(2)}`;
+            } else if (i < points.length - 1) {
+                path += ` S ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2.x.toFixed(2)},${p2.y.toFixed(2)}`;
+            }
+        }
+    }
+
+    path += ' Z';
+    return path;
+}
+
+// 輪郭抽出（Marching Squares アルゴリズム - 簡易版）
 function traceContours(imageData) {
     const width = imageData.width;
     const height = imageData.height;
@@ -375,14 +739,17 @@ function traceContours(imageData) {
         return imageData.data[idx] === 0;
     }
 
-    // 訪問済みエッジを記録
-    const visitedEdges = new Set();
+    // 訪問済みセルを記録
+    const visited = new Uint8Array(width * height);
 
-    console.log('  Marching Squares で輪郭を抽出中...');
+    console.log('輪郭を抽出中...');
 
-    // 全てのセルをスキャンして輪郭の開始点を探す
+    // 全てのセルをスキャン
     for (let y = 0; y < height - 1; y++) {
         for (let x = 0; x < width - 1; x++) {
+            const idx = y * width + x;
+            if (visited[idx]) continue;
+
             // 2x2のセルの4隅の状態を取得
             const tl = isBlack(x, y) ? 1 : 0;
             const tr = isBlack(x + 1, y) ? 1 : 0;
@@ -392,26 +759,31 @@ function traceContours(imageData) {
             // Marching Squares のケース番号（0-15）
             const cellType = tl * 8 + tr * 4 + br * 2 + bl * 1;
 
-            // エッジがあるケースのみ処理（0と15は完全に内側または外側）
+            // エッジがあるケースのみ処理
             if (cellType === 0 || cellType === 15) continue;
 
-            // このセルから輪郭をトレース開始
-            const edgeKey = `${x},${y}`;
-            if (visitedEdges.has(edgeKey)) continue;
-
-            const contour = marchingSquaresTrace(imageData, x, y, visitedEdges);
-            if (contour && contour.length > 10) {
+            // 輪郭をトレース
+            const contour = marchingSquaresTrace(imageData, x, y, visited);
+            if (contour && contour.length > 15) {  // 閾値を下げて細い線も拾う
                 contours.push(contour);
+                console.log(`輪郭検出: ${contour.length}点`);
+            }
+
+            // メモリ保護: 輪郭数が多すぎる場合は中断
+            if (contours.length > 1000) {
+                console.warn('輪郭数が1000を超えたため処理を中断');
+                break;
             }
         }
+        if (contours.length > 1000) break;
     }
 
-    console.log(`  ${contours.length}個の輪郭を検出`);
+    console.log(`合計 ${contours.length}個の輪郭を検出`);
     return contours;
 }
 
-// Marching Squares で輪郭を追跡
-function marchingSquaresTrace(imageData, startX, startY, visitedEdges) {
+// Marching Squares で輪郭を追跡（簡易版）
+function marchingSquaresTrace(imageData, startX, startY, visited) {
     const width = imageData.width;
     const height = imageData.height;
     const contour = [];
@@ -422,17 +794,18 @@ function marchingSquaresTrace(imageData, startX, startY, visitedEdges) {
         return imageData.data[idx] === 0;
     }
 
-    // 現在のセル位置
     let x = startX;
     let y = startY;
-    let prevDir = -1;
-
-    const maxSteps = width * height * 4; // 無限ループ防止
+    const maxSteps = 10000; // 無限ループ防止
     let steps = 0;
 
     do {
-        const edgeKey = `${x},${y}`;
-        visitedEdges.add(edgeKey);
+        const idx = y * width + x;
+        if (visited[idx]) break;
+        visited[idx] = 1;
+
+        // 境界チェック
+        if (x < 0 || x >= width - 1 || y < 0 || y >= height - 1) break;
 
         // 2x2セルの4隅
         const tl = isBlack(x, y) ? 1 : 0;
@@ -442,61 +815,57 @@ function marchingSquaresTrace(imageData, startX, startY, visitedEdges) {
 
         const cellType = tl * 8 + tr * 4 + br * 2 + bl * 1;
 
-        // セルの中心点を輪郭に追加（線形補間で精度向上）
+        // エッジがない場合は終了
+        if (cellType === 0 || cellType === 15) break;
+
+        // エッジ位置を計算（簡略版）
         let px = x + 0.5;
         let py = y + 0.5;
 
-        // Marching Squares のルックアップテーブル
-        // 各ケースに対してエッジの方向を決定
-        let nextDir = -1;
+        // 基本的なケースのみ処理
+        if (cellType & 0b0001) py += 0.25;
+        if (cellType & 0b0010) px += 0.25;
+        if (cellType & 0b0100) py -= 0.25;
+        if (cellType & 0b1000) px -= 0.25;
 
-        switch (cellType) {
-            case 1: px = x + 0.25; py = y + 0.75; nextDir = 2; break; // 左下
-            case 2: px = x + 0.75; py = y + 0.75; nextDir = 1; break; // 右下
-            case 3: px = x + 0.5; py = y + 1; nextDir = 1; break; // 下
-            case 4: px = x + 0.75; py = y + 0.25; nextDir = 0; break; // 右上
-            case 5: // あいまいなケース
-                px = x + 0.5; py = y + 0.5;
-                nextDir = prevDir === 3 ? 0 : 2;
-                break;
-            case 6: px = x + 1; py = y + 0.5; nextDir = 0; break; // 右
-            case 7: px = x + 0.75; py = y + 0.25; nextDir = 0; break; // 右上
-            case 8: px = x + 0.25; py = y + 0.25; nextDir = 3; break; // 左上
-            case 9: px = x; py = y + 0.5; nextDir = 2; break; // 左
-            case 10: // あいまいなケース
-                px = x + 0.5; py = y + 0.5;
-                nextDir = prevDir === 1 ? 2 : 0;
-                break;
-            case 11: px = x + 0.25; py = y + 0.75; nextDir = 2; break; // 左下
-            case 12: px = x + 0.5; py = y; nextDir = 3; break; // 上
-            case 13: px = x + 0.25; py = y + 0.25; nextDir = 3; break; // 左上
-            case 14: px = x + 0.75; py = y + 0.75; nextDir = 1; break; // 右下
-            default: nextDir = -1;
+        contour.push({ x: px, y: py });
+
+        // 次のセルを探索（8近傍）
+        let found = false;
+        for (let dy = -1; dy <= 1 && !found; dy++) {
+            for (let dx = -1; dx <= 1 && !found; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const nx = x + dx;
+                const ny = y + dy;
+                if (nx < 0 || nx >= width - 1 || ny < 0 || ny >= height - 1) continue;
+
+                const nidx = ny * width + nx;
+                if (visited[nidx]) continue;
+
+                // 隣接セルにエッジがあるか確認
+                const ntl = isBlack(nx, ny) ? 1 : 0;
+                const ntr = isBlack(nx + 1, ny) ? 1 : 0;
+                const nbr = isBlack(nx + 1, ny + 1) ? 1 : 0;
+                const nbl = isBlack(nx, ny + 1) ? 1 : 0;
+                const ntype = ntl * 8 + ntr * 4 + nbr * 2 + nbl * 1;
+
+                if (ntype !== 0 && ntype !== 15) {
+                    x = nx;
+                    y = ny;
+                    found = true;
+                }
+            }
         }
 
-        if (nextDir !== -1) {
-            contour.push({ x: px, y: py });
-        }
+        if (!found) break;
 
-        // 次のセルへ移動
-        switch (nextDir) {
-            case 0: x++; break;     // 右
-            case 1: y++; break;     // 下
-            case 2: x--; break;     // 左
-            case 3: y--; break;     // 上
-            default: return null;   // エラー
-        }
-
-        prevDir = nextDir;
         steps++;
+        if (steps >= maxSteps) {
+            console.warn('輪郭トレースの最大ステップ数に達しました');
+            break;
+        }
 
-        // 境界チェック
-        if (x < 0 || x >= width - 1 || y < 0 || y >= height - 1) break;
-
-        // 開始点に戻ったら終了
-        if (x === startX && y === startY && contour.length > 2) break;
-
-    } while (steps < maxSteps);
+    } while (true);
 
     return contour;
 }
@@ -544,76 +913,17 @@ function smoothContour(contour, tolerance = 2.0) {
     return simplify(contour, tolerance);
 }
 
-// 輪郭をSVGパスに変換（ベジェ曲線で滑らかに）
-function contourToPath(contour) {
-    if (contour.length < 2) return '';
 
-    let path = `M ${contour[0].x},${contour[0].y}`;
-
-    if (contour.length === 2) {
-        path += ` L ${contour[1].x},${contour[1].y}`;
-    } else {
-        // Catmull-Rom スプライン補間でベジェ曲線を生成
-        for (let i = 0; i < contour.length; i++) {
-            const p0 = contour[(i - 1 + contour.length) % contour.length];
-            const p1 = contour[i];
-            const p2 = contour[(i + 1) % contour.length];
-            const p3 = contour[(i + 2) % contour.length];
-
-            // カトマル・ロムからベジェ曲線の制御点を計算
-            const cp1x = p1.x + (p2.x - p0.x) / 6;
-            const cp1y = p1.y + (p2.y - p0.y) / 6;
-            const cp2x = p2.x - (p3.x - p1.x) / 6;
-            const cp2y = p2.y - (p3.y - p1.y) / 6;
-
-            if (i === 0) {
-                path += ` C ${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
-            } else if (i < contour.length - 1) {
-                path += ` S ${cp2x},${cp2y} ${p2.x},${p2.y}`;
-            }
-        }
-    }
-
-    path += ' Z';
-    return path;
-}
-
-// SVGダウンロード
-document.getElementById('downloadSvg').addEventListener('click', function() {
-    const svg = document.getElementById('svgOutput');
-    const svgData = new XMLSerializer().serializeToString(svg);
-    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(svgBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'handwriting.svg';
-    link.click();
-    URL.revokeObjectURL(url);
-});
-
-// PNG ダウンロード
+// PNG ダウンロード（アルファ付き）
 document.getElementById('downloadPng').addEventListener('click', function() {
-    const canvas = document.getElementById('correctedCanvas');
+    const canvas = document.getElementById('alphaCanvas');
+
     canvas.toBlob(function(blob) {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = 'corrected-drawing.png';
+        link.download = 'handwriting-alpha.png';
         link.click();
         URL.revokeObjectURL(url);
-    });
-});
-
-// SVGコピー
-document.getElementById('copySvg').addEventListener('click', function() {
-    const svg = document.getElementById('svgOutput');
-    const svgData = new XMLSerializer().serializeToString(svg);
-    navigator.clipboard.writeText(svgData).then(() => {
-        const btn = document.getElementById('copySvg');
-        const originalText = btn.textContent;
-        btn.textContent = 'コピーしました！';
-        setTimeout(() => {
-            btn.textContent = originalText;
-        }, 2000);
-    });
+    }, 'image/png');
 });
