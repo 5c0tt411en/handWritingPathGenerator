@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>カラー手書き絵プロセッサ</title>
+    <style>
+        body {
+            font-family: Arial;
+            padding: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .status {
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        .status.loading { background: #fff3e0; color: #e65100; }
+        .status.success { background: #e8f5e9; color: #2e7d32; }
+        .status.error { background: #ffebee; color: #c62828; }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }
+        .controls label {
+            display: block;
+            margin: 10px 0;
+        }
+        .controls input[type="range"] {
+            width: 200px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #4caf50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #388e3c; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .canvas-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .canvas-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .canvas-box h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        canvas {
+            max-width: 100%;
+            border: 1px solid #ddd;
+        }
+        #alphaCanvas {
+            background-image:
+                linear-gradient(45deg, #ccc 25%, transparent 25%),
+                linear-gradient(-45deg, #ccc 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #ccc 75%),
+                linear-gradient(-45deg, transparent 75%, #ccc 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+        .batch-section {
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .file-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 10px 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .file-item {
+            background: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 12px;
+        }
+        .file-item.processing { background: #fff3e0; }
+        .file-item.done { background: #e8f5e9; }
+        .file-item.error { background: #ffebee; }
+    </style>
+</head>
+<body>
+    <h1>カラー手書き絵プロセッサ</h1>
+
+    <div id="status" class="status loading">画像を選択してください</div>
+
+    <div class="controls">
+        <h3>1. スキャン画像を選択</h3>
+        <input type="file" id="imageInput" accept="image/*" multiple>
+
+        <h3>2. マーカー検出設定</h3>
+        <p style="font-size: 12px; color: #666;">
+            マーカー検出に問題がある場合、複数の前処理方法を自動で試行します。<br>
+            コンソール（F12）で検出過程の詳細を確認できます。
+        </p>
+
+        <h3>3. 処理設定</h3>
+        <label>
+            マーカー余白: <span id="insetValue">3.5</span> mm
+            <input type="range" id="insetMargin" min="0" max="10" step="0.5" value="3.5" oninput="document.getElementById('insetValue').textContent = this.value; reprocess();">
+            <small>（マーカーから描画枠までの余白）</small>
+        </label>
+        <label>
+            画像スケール: <span id="imageScaleValue">73</span> %
+            <input type="range" id="imageScale" min="50" max="100" step="1" value="73" oninput="document.getElementById('imageScaleValue').textContent = this.value; reprocess();">
+            <small>（テンプレート生成時と同じ値に設定してください）</small>
+        </label>
+        <label>
+            背景色差の閾値: <span id="thresholdValue">50</span>
+            <input type="range" id="threshold" min="10" max="150" value="50" oninput="document.getElementById('thresholdValue').textContent = this.value; reprocess();">
+            <small>（高いほど、背景色に近い色を広く透明にします）</small>
+        </label>
+        <label>
+            エッジ保護: <span id="edgeProtectValue">30</span>
+            <input type="range" id="edgeProtect" min="0" max="100" value="30" oninput="document.getElementById('edgeProtectValue').textContent = this.value; reprocess();">
+            <small>（黒い輪郭線の周辺を保護して色を残します）</small>
+        </label>
+
+        <h4 style="margin-top: 15px;">保護色設定</h4>
+        <p style="font-size: 12px; color: #666;">背景と似ている色を保護して残します</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+            <label style="display: flex; align-items: center; gap: 5px;">
+                <input type="checkbox" id="protectSkinColor" checked onchange="reprocess();">
+                肌色を保護
+                <input type="color" id="skinColor" value="#FEDCBD" onchange="reprocess();" style="width: 40px; height: 25px;">
+            </label>
+            <label style="display: flex; align-items: center; gap: 5px;">
+                保護範囲: <span id="protectRangeValue">60</span>
+                <input type="range" id="protectRange" min="20" max="120" value="60" oninput="document.getElementById('protectRangeValue').textContent = this.value; reprocess();">
+            </label>
+        </div>
+        <div style="margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+            <label style="display: flex; align-items: center; gap: 5px;">
+                <input type="checkbox" id="protectCustomColor1" onchange="reprocess();">
+                カスタム色1
+                <input type="color" id="customColor1" value="#FFB6C1" onchange="reprocess();" style="width: 40px; height: 25px;">
+            </label>
+            <label style="display: flex; align-items: center; gap: 5px;">
+                <input type="checkbox" id="protectCustomColor2" onchange="reprocess();">
+                カスタム色2
+                <input type="color" id="customColor2" value="#ADD8E6" onchange="reprocess();" style="width: 40px; height: 25px;">
+            </label>
+        </div>
+
+        <div id="detectedBgColor" style="margin-top: 10px; padding: 10px; border-radius: 5px; display: none;">
+            <strong>検出された背景色:</strong> <span id="bgColorDisplay"></span>
+            <div id="bgColorSwatch" style="display: inline-block; width: 30px; height: 20px; border: 1px solid #333; vertical-align: middle; margin-left: 10px;"></div>
+        </div>
+    </div>
+
+    <div class="batch-section">
+        <h3>一括処理</h3>
+        <p>複数ファイルを選択した場合、一括で処理してダウンロードできます。</p>
+        <button onclick="processAllFiles()" id="batchProcessBtn" disabled>全ファイルを処理</button>
+        <button onclick="downloadAllResults()" id="downloadAllBtn" disabled>全結果をダウンロード</button>
+        <div id="fileList" class="file-list"></div>
+    </div>
+
+    <div>
+        <button onclick="downloadPng()" id="downloadPng" disabled>カラーPNGダウンロード</button>
+    </div>
+
+    <div class="canvas-container">
+        <div class="canvas-box">
+            <h3>1. 元画像（マーカー検出）</h3>
+            <canvas id="originalCanvas"></canvas>
+        </div>
+        <div class="canvas-box">
+            <h3>2. 補正後（パース補正済み）</h3>
+            <canvas id="correctedCanvas"></canvas>
+        </div>
+        <div class="canvas-box">
+            <h3>3. 白背景マスク</h3>
+            <canvas id="maskCanvas"></canvas>
+        </div>
+        <div class="canvas-box">
+            <h3>4. カラーアルファPNG</h3>
+            <canvas id="alphaCanvas"></canvas>
+        </div>
+    </div>
+
+    <script src="cv.js"></script>
+    <script src="aruco2.js"></script>
+    <script src="color-processor.js"></script>
+</body>
+</html>

@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>色塗り用テンプレート生成</title>
+    <style>
+        body {
+            font-family: Arial;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        #info {
+            background: #fff3e0;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px 5px;
+            background: #ff9800;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #f57c00; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        canvas {
+            border: 1px solid #ddd;
+            margin: 20px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            max-width: 100%;
+        }
+        .controls {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .controls label {
+            display: block;
+            margin: 10px 0;
+        }
+        .preview {
+            text-align: center;
+        }
+        .file-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 20px 0;
+            max-height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .file-item {
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            padding: 5px;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .file-item:hover { border-color: #ff9800; }
+        .file-item.selected { border-color: #ff9800; background: #fff3e0; }
+        .file-item img {
+            max-width: 100%;
+            max-height: 100px;
+            display: block;
+            margin: 0 auto 5px;
+        }
+        .file-item span {
+            font-size: 11px;
+            word-break: break-all;
+        }
+        .batch-controls {
+            background: #e8f5e9;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        #status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        #status.loading { background: #fff3e0; }
+        #status.success { background: #e8f5e9; }
+        #status.error { background: #ffebee; }
+    </style>
+</head>
+<body>
+    <h1>色塗り用テンプレート生成ツール</h1>
+
+    <div id="info">
+        <strong>🎨 色塗り用テンプレート</strong><br>
+        既存の手書き絵PNG（アウトライン）をテンプレートに配置し、色塗り用の印刷シートを生成します。<br>
+        色を塗った後、スキャンしてカラープロセッサで処理します。
+    </div>
+
+    <div class="controls">
+        <h3>1. 画像を選択</h3>
+        <p>ファイルを選択するか、下のリストから既存の画像を選んでください：</p>
+        <input type="file" id="imageInput" accept="image/png" multiple>
+
+        <h4>または、フォルダから画像を読み込み：</h4>
+        <input type="file" id="folderInput" webkitdirectory multiple>
+
+        <div id="fileList" class="file-list" style="display: none;"></div>
+    </div>
+
+    <div class="controls">
+        <h3>2. テンプレート設定</h3>
+        <label>
+            用紙サイズ:
+            <select id="paperSize">
+                <option value="A4">A4 (210mm x 297mm)</option>
+                <option value="Letter">Letter (8.5" x 11")</option>
+            </select>
+        </label>
+        <label>
+            描画枠サイズ:
+            <input type="number" id="frameSize" value="150" min="100" max="200" step="10"> mm
+        </label>
+        <label>
+            マーカーサイズ:
+            <input type="number" id="markerSize" value="30" min="15" max="40" step="5"> mm
+        </label>
+        <label>
+            画像サイズ（枠内での比率）:
+            <input type="number" id="imageScale" value="73" min="50" max="100" step="1"> %
+            <small>（color-processorと同じ値に設定）</small>
+        </label>
+        <label>
+            <input type="checkbox" id="showOutline" checked> 描画枠を表示
+        </label>
+    </div>
+
+    <div class="batch-controls">
+        <h3>3. 一括処理</h3>
+        <button onclick="generateAllTemplates()" id="batchBtn" disabled>選択した全画像のテンプレートを生成</button>
+        <button onclick="downloadAllAsZip()" id="downloadAllBtn" disabled>全てZIPでダウンロード</button>
+        <div id="status"></div>
+    </div>
+
+    <div>
+        <button onclick="generateTemplate()" id="generateBtn" disabled>プレビュー生成</button>
+        <button onclick="downloadPNG()" id="downloadBtn" disabled>PNGダウンロード（300dpi）</button>
+    </div>
+
+    <div class="preview">
+        <h3>プレビュー</h3>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script src="cv.js"></script>
+    <script src="aruco2.js"></script>
+    <script>
+        const dict = new AR.Dictionary('ARUCO');
+
+        // mm to pixel conversion (300 DPI = 11.811 pixels per mm)
+        const DPI = 300;
+        const MM_TO_PX = DPI / 25.4;
+
+        let selectedImages = [];
+        let currentImageIndex = 0;
+        let generatedTemplates = [];
+
+        // ファイル選択（単一/複数）
+        document.getElementById('imageInput').addEventListener('change', function(e) {
+            handleFiles(e.target.files);
+        });
+
+        // フォルダ選択
+        document.getElementById('folderInput').addEventListener('change', function(e) {
+            const pngFiles = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith('.png'));
+            handleFiles(pngFiles);
+        });
+
+        function handleFiles(files) {
+            selectedImages = [];
+            const fileListEl = document.getElementById('fileList');
+            fileListEl.innerHTML = '';
+            fileListEl.style.display = 'grid';
+
+            Array.from(files).forEach((file, index) => {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    const img = new Image();
+                    img.onload = function() {
+                        selectedImages.push({
+                            file: file,
+                            img: img,
+                            name: file.name.replace('.png', '')
+                        });
+
+                        // ファイルリストにプレビューを追加
+                        const item = document.createElement('div');
+                        item.className = 'file-item';
+                        item.dataset.index = selectedImages.length - 1;
+                        item.innerHTML = `<img src="${event.target.result}"><span>${file.name}</span>`;
+                        item.onclick = function() {
+                            document.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+                            this.classList.add('selected');
+                            currentImageIndex = parseInt(this.dataset.index);
+                            generateTemplate();
+                        };
+                        fileListEl.appendChild(item);
+
+                        updateButtons();
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function updateButtons() {
+            const hasImages = selectedImages.length > 0;
+            document.getElementById('generateBtn').disabled = !hasImages;
+            document.getElementById('batchBtn').disabled = !hasImages;
+        }
+
+        function generateTemplate() {
+            if (selectedImages.length === 0) {
+                alert('まず画像を選択してください');
+                return;
+            }
+
+            const imageData = selectedImages[currentImageIndex];
+            const img = imageData.img;
+
+            const paperSize = document.getElementById('paperSize').value;
+            const frameSize = parseFloat(document.getElementById('frameSize').value);
+            const markerSize = parseFloat(document.getElementById('markerSize').value);
+            const imageScale = parseFloat(document.getElementById('imageScale').value) / 100;
+            const showOutline = document.getElementById('showOutline').checked;
+
+            // 用紙サイズ（mm）
+            let paperWidth, paperHeight;
+            if (paperSize === 'A4') {
+                paperWidth = 210;
+                paperHeight = 297;
+            } else {
+                paperWidth = 215.9;
+                paperHeight = 279.4;
+            }
+
+            // ピクセルに変換
+            const canvasWidth = Math.round(paperWidth * MM_TO_PX);
+            const canvasHeight = Math.round(paperHeight * MM_TO_PX);
+            const frameSizePx = Math.round(frameSize * MM_TO_PX);
+            const markerSizePx = Math.round(markerSize * MM_TO_PX);
+
+            const canvas = document.getElementById('canvas');
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+            const ctx = canvas.getContext('2d');
+
+            // 白背景
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+            // 中央に描画枠を配置
+            const frameX = (canvasWidth - frameSizePx) / 2;
+            const frameY = (canvasHeight - frameSizePx) / 2;
+
+            // 描画枠（黒線）- オプション
+            if (showOutline) {
+                ctx.strokeStyle = '#cccccc';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(frameX, frameY, frameSizePx, frameSizePx);
+            }
+
+            // 画像を中央に配置（アスペクト比を維持）
+            const maxImageSize = frameSizePx * imageScale;
+            const imgAspect = img.width / img.height;
+            let drawWidth, drawHeight;
+
+            if (imgAspect > 1) {
+                drawWidth = maxImageSize;
+                drawHeight = maxImageSize / imgAspect;
+            } else {
+                drawHeight = maxImageSize;
+                drawWidth = maxImageSize * imgAspect;
+            }
+
+            const imgX = frameX + (frameSizePx - drawWidth) / 2;
+            const imgY = frameY + (frameSizePx - drawHeight) / 2;
+
+            ctx.drawImage(img, imgX, imgY, drawWidth, drawHeight);
+
+            // 四隅にARマーカーを配置
+            const margin = 0;
+            const positions = [
+                { id: 0, x: frameX - margin - markerSizePx, y: frameY - margin - markerSizePx },
+                { id: 1, x: frameX + frameSizePx + margin, y: frameY - margin - markerSizePx },
+                { id: 2, x: frameX + frameSizePx + margin, y: frameY + frameSizePx + margin },
+                { id: 3, x: frameX - margin - markerSizePx, y: frameY + frameSizePx + margin }
+            ];
+
+            // ARマーカーを描画
+            let markersDrawn = 0;
+            positions.forEach(pos => {
+                drawARMarker(ctx, pos.id, pos.x, pos.y, markerSizePx, () => {
+                    markersDrawn++;
+                    if (markersDrawn === 4) {
+                        document.getElementById('downloadBtn').disabled = false;
+                    }
+                });
+            });
+
+            // ガイドテキスト
+            ctx.fillStyle = '#000000';
+            ctx.font = '48px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('いろをぬってね', canvasWidth / 2, frameY - 80);
+
+            // 名前記入欄
+            const nameZoneWidth = Math.round(100 * MM_TO_PX);
+            const nameZoneHeight = Math.round(22.5 * MM_TO_PX);
+            const nameZoneX = canvasWidth - nameZoneWidth - Math.round(10 * MM_TO_PX);
+            const nameZoneY = Math.round(10 * MM_TO_PX);
+
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(nameZoneX, nameZoneY, nameZoneWidth, nameZoneHeight);
+
+            ctx.fillStyle = '#000000';
+            ctx.font = '32px Arial';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText('なまえ', nameZoneX + 10, nameZoneY + 10);
+
+            // ファイル名表示
+            ctx.font = '24px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(imageData.name, Math.round(10 * MM_TO_PX), canvasHeight - Math.round(10 * MM_TO_PX));
+
+            console.log(`テンプレート生成: ${imageData.name}`);
+        }
+
+        function drawARMarker(ctx, id, x, y, size, callback) {
+            const svgString = dict.generateSVG(id);
+            const img = new Image();
+            const svgBlob = new Blob([svgString], {type: 'image/svg+xml'});
+            const url = URL.createObjectURL(svgBlob);
+
+            img.onload = function() {
+                ctx.drawImage(img, x, y, size, size);
+                URL.revokeObjectURL(url);
+                if (callback) callback();
+            };
+            img.src = url;
+        }
+
+        function downloadPNG() {
+            const canvas = document.getElementById('canvas');
+            if (canvas.width === 0) {
+                alert('まずテンプレートを生成してください');
+                return;
+            }
+
+            const imageData = selectedImages[currentImageIndex];
+            canvas.toBlob(function(blob) {
+                const link = document.createElement('a');
+                link.download = `coloring-${imageData.name}.png`;
+                link.href = URL.createObjectURL(blob);
+                link.click();
+            });
+        }
+
+        async function generateAllTemplates() {
+            const statusEl = document.getElementById('status');
+            statusEl.className = 'status loading';
+            generatedTemplates = [];
+
+            for (let i = 0; i < selectedImages.length; i++) {
+                currentImageIndex = i;
+                statusEl.textContent = `生成中... ${i + 1}/${selectedImages.length}: ${selectedImages[i].name}`;
+
+                // テンプレートを生成
+                generateTemplate();
+
+                // マーカーの描画を待つ
+                await new Promise(resolve => setTimeout(resolve, 200));
+
+                // Canvasをblobに変換して保存
+                const canvas = document.getElementById('canvas');
+                const blob = await new Promise(resolve => canvas.toBlob(resolve));
+                generatedTemplates.push({
+                    name: selectedImages[i].name,
+                    blob: blob
+                });
+            }
+
+            statusEl.className = 'status success';
+            statusEl.textContent = `✓ ${generatedTemplates.length}個のテンプレートを生成しました`;
+            document.getElementById('downloadAllBtn').disabled = false;
+        }
+
+        async function downloadAllAsZip() {
+            if (generatedTemplates.length === 0) {
+                alert('まずテンプレートを生成してください');
+                return;
+            }
+
+            const statusEl = document.getElementById('status');
+            statusEl.className = 'status loading';
+            statusEl.textContent = '個別ダウンロード中...';
+
+            // ZIPライブラリがない場合は個別ダウンロード
+            for (let i = 0; i < generatedTemplates.length; i++) {
+                const template = generatedTemplates[i];
+                const link = document.createElement('a');
+                link.download = `coloring-${template.name}.png`;
+                link.href = URL.createObjectURL(template.blob);
+                link.click();
+
+                // ブラウザのダウンロード制限を避けるため少し待つ
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                statusEl.textContent = `ダウンロード中... ${i + 1}/${generatedTemplates.length}`;
+            }
+
+            statusEl.className = 'status success';
+            statusEl.textContent = `✓ ${generatedTemplates.length}個のファイルをダウンロードしました`;
+        }
+    </script>
+</body>
+</html>
