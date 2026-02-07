@@ -68,6 +68,24 @@ function preprocessImage(imageData) {
     return enhanced;
 }
 
+// ブラー前処理（Canvas filter利用）
+function blurImage(imageData, radius) {
+    const canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(imageData, 0, 0);
+
+    const canvas2 = document.createElement('canvas');
+    canvas2.width = imageData.width;
+    canvas2.height = imageData.height;
+    const ctx2 = canvas2.getContext('2d');
+    ctx2.filter = `blur(${radius}px)`;
+    ctx2.drawImage(canvas, 0, 0);
+
+    return ctx2.getImageData(0, 0, canvas2.width, canvas2.height);
+}
+
 // シャープ化フィルタ
 function sharpenImage(imageData) {
     const data = imageData.data;
@@ -116,7 +134,8 @@ function sharpenImage(imageData) {
     return output;
 }
 
-// 複数の前処理を試してマーカーを検出
+// 複数の前処理・二値化パラメータを試してマーカーを検出
+// 異なる試行からの結果を統合して全4マーカーの検出を目指す
 function detectMarkersWithPreprocessing(img) {
     const statusEl = document.getElementById('status');
     const canvas = document.createElement('canvas');
@@ -126,50 +145,191 @@ function detectMarkersWithPreprocessing(img) {
     ctx.drawImage(img, 0, 0);
     const originalData = ctx.getImageData(0, 0, img.width, img.height);
 
-    // 検出方法のリスト
+    // 適応二値化パラメータ（優先順）
+    // kernelSize: ボックスブラーの半径（実際のウィンドウは (2k+1)×(2k+1)）
+    // threshold: ローカル平均との差の閾値
+    const thresholdParams = [
+        { k: 2, t: 7 },     // デフォルト（5×5ウィンドウ）
+        { k: 4, t: 10 },    // 中カーネル（9×9, 不均一照明に対応）
+        { k: 7, t: 15 },    // 大カーネル（15×15, 強い照明ムラに対応）
+        { k: 10, t: 20 },   // 特大カーネル（21×21, 角の暗い影に対応）
+    ];
+
+    // 前処理はキャッシュして必要時に計算
+    let contrastData = null;
+    let sharpData = null;
+    let contrastSharpData = null;
+    let blurData = null;
+    let blurContrastData = null;
+
+    const getContrastData = () => contrastData || (contrastData = preprocessImage(originalData));
+    const getSharpData = () => sharpData || (sharpData = sharpenImage(originalData));
+    const getContrastSharpData = () => contrastSharpData || (contrastSharpData = sharpenImage(getContrastData()));
+    const getBlurData = () => blurData || (blurData = blurImage(originalData, 1));
+    const getBlurContrastData = () => blurContrastData || (blurContrastData = preprocessImage(getBlurData()));
+
     const methods = [
-        { name: '元画像', data: originalData },
-        { name: 'コントラスト強調', data: preprocessImage(originalData) },
-        { name: 'シャープ化', data: sharpenImage(originalData) },
-        { name: 'コントラスト+シャープ', data: sharpenImage(preprocessImage(originalData)) }
+        { name: '元画像', getData: () => originalData },
+        { name: 'コントラスト強調', getData: getContrastData },
+        { name: 'シャープ化', getData: getSharpData },
+        { name: 'コントラスト+シャープ', getData: getContrastSharpData },
+        { name: 'ブラー(1px)', getData: getBlurData },
+        { name: 'ブラー+コントラスト', getData: getBlurContrastData },
     ];
 
     let bestResult = { markers: [], method: '' };
     let attemptLog = [];
+    const validIds = new Set([0, 1, 2, 3]);
 
-    for (const method of methods) {
-        statusEl.textContent = `検出中: ${method.name}...`;
-        try {
-            const markers = detector.detect(method.data);
+    // ユニークID数をカウント（重複マーカーを除外）
+    function countUniqueValidIds(markers) {
+        return new Set(markers.filter(m => validIds.has(m.id)).map(m => m.id)).size;
+    }
+    const bestCount = () => countUniqueValidIds(bestResult.markers);
 
-            // ID 0-3のマーカーをカウント
-            const validIds = new Set([0, 1, 2, 3]);
-            const foundValidMarkers = markers.filter(m => validIds.has(m.id));
-            const foundIds = foundValidMarkers.length;
+    // 各IDの最良の検出結果を保持（異なる試行からの結果を統合）
+    const bestMarkerById = {};
 
-            attemptLog.push(`${method.name}: ID 0-3を${foundIds}個検出`);
-            console.log(`${method.name}: 全${markers.length}個, ID 0-3: ${foundIds}個`, foundValidMarkers.map(m => `ID${m.id}`));
-
-            if (foundIds > bestResult.markers.filter(m => validIds.has(m.id)).length) {
-                bestResult = { markers: markers, method: method.name };
+    function updateBestMarkers(markers, label) {
+        for (const marker of markers) {
+            if (!validIds.has(marker.id)) continue;
+            const existing = bestMarkerById[marker.id];
+            if (!existing || (marker.hammingDistance || 0) < (existing.hammingDistance || 0)) {
+                bestMarkerById[marker.id] = { ...marker, _method: label };
             }
-
-            // 4つすべて見つかったら終了
-            if (foundIds >= 4) {
-                console.log(`✓ ${method.name}で全マーカーを検出`);
-                statusEl.textContent = `✓ ${method.name}で全マーカー検出成功`;
-                return { markers: markers, processedData: method.data, log: attemptLog };
-            }
-        } catch (e) {
-            console.warn(`${method.name}での検出に失敗:`, e);
-            attemptLog.push(`${method.name}: エラー`);
         }
     }
 
-    // 画像をダウンスケールして再試行（大きい画像の場合）
+    function getMergedResult() {
+        if ([0, 1, 2, 3].every(id => bestMarkerById[id])) {
+            const mergedMarkers = [0, 1, 2, 3].map(id => bestMarkerById[id]);
+            const usedMethods = [...new Set(mergedMarkers.map(m => m._method))];
+            return {
+                markers: mergedMarkers,
+                processedData: originalData,
+                log: attemptLog,
+                mergedFrom: usedMethods
+            };
+        }
+        return null;
+    }
+
+    // マーカーリストから各IDの最良結果のみを抽出（重複除去）
+    function deduplicateMarkers(markers) {
+        const byId = {};
+        for (const marker of markers) {
+            if (!validIds.has(marker.id)) continue;
+            const existing = byId[marker.id];
+            if (!existing || (marker.hammingDistance || 0) < (existing.hammingDistance || 0)) {
+                byId[marker.id] = marker;
+            }
+        }
+        return Object.values(byId);
+    }
+
+    // 試行を実行する共通関数
+    function tryDetect(data, detectOptions, label) {
+        statusEl.textContent = `検出中: ${label}...`;
+        try {
+            const markers = detector.detect(data, detectOptions);
+
+            const foundValidMarkers = markers.filter(m => validIds.has(m.id));
+            const uniqueIds = new Set(foundValidMarkers.map(m => m.id));
+            const uniqueCount = uniqueIds.size;
+
+            attemptLog.push(`${label}: ${uniqueCount}種のID検出 [${[...uniqueIds].sort().join(',')}]`);
+            console.log(`${label}: 全${markers.length}個, ユニークID: ${uniqueCount}個 [${[...uniqueIds].sort().join(',')}]`);
+
+            if (uniqueCount > bestCount()) {
+                bestResult = { markers: markers, method: label };
+            }
+
+            updateBestMarkers(markers, label);
+
+            // 単一試行で全4種のIDを検出
+            if (uniqueCount >= 4) {
+                const deduplicated = deduplicateMarkers(markers);
+                console.log(`✓ ${label}で全マーカーを検出`);
+                statusEl.textContent = `✓ ${label}で全マーカー検出成功`;
+                return { markers: deduplicated, processedData: data, log: attemptLog };
+            }
+
+            // 統合結果で全4マーカー検出
+            const merged = getMergedResult();
+            if (merged) {
+                console.log(`✓ 統合検出で全マーカーを検出 (${merged.mergedFrom.join(' + ')})`);
+                statusEl.textContent = `✓ 統合検出で全マーカー検出成功`;
+                return merged;
+            }
+
+            return null;
+        } catch (e) {
+            console.warn(`${label}での検出に失敗:`, e);
+            attemptLog.push(`${label}: エラー`);
+            return null;
+        }
+    }
+
+    // Phase 1a: 適応二値化で試行（パラメータ優先: まず全前処理をデフォルトで試し、次にパラメータ変更）
+    for (const params of thresholdParams) {
+        for (const method of methods) {
+            const label = `${method.name}(k=${params.k},t=${params.t})`;
+            const result = tryDetect(method.getData(), {
+                adaptiveKernelSize: params.k,
+                adaptiveThreshold: params.t
+            }, label);
+            if (result) return result;
+        }
+    }
+
+    // Phase 1b: グローバル大津二値化で試行
+    // 適応二値化では検出できないマーカー（ID 0等、大きな均一黒領域を持つもの）に有効
+    // 適応二値化は局所平均を使うため、広い黒領域の内部で黒ピクセルが白に誤判定される
+    console.log('Phase 1b: グローバル大津二値化で試行...');
+    for (const method of methods) {
+        const label = `${method.name}(Otsu)`;
+        const result = tryDetect(method.getData(), { useGlobalThreshold: true }, label);
+        if (result) return result;
+    }
+
+    // Phase 2: ダウンスケールで再試行（高解像度画像の場合）
     if (img.width > 2000 || img.height > 2000) {
         statusEl.textContent = '高解像度画像 - ダウンスケールで再試行...';
         console.log('高解像度画像を検出 - ダウンスケールで再試行...');
+
+        // スケール済み画像での検出を試行し、座標をスケールアップして返す共通関数
+        function tryScaledDetect(data, detectOptions, label, scale) {
+            try {
+                const markers = detector.detect(data, detectOptions);
+                markers.forEach(marker => {
+                    marker.corners = marker.corners.map(corner => ({
+                        x: corner.x / scale,
+                        y: corner.y / scale
+                    }));
+                });
+
+                const foundValidMarkers = markers.filter(m => validIds.has(m.id));
+                const uniqueIds = new Set(foundValidMarkers.map(m => m.id));
+                const uniqueCount = uniqueIds.size;
+
+                attemptLog.push(`${label}: ${uniqueCount}種のID検出 [${[...uniqueIds].sort().join(',')}]`);
+                console.log(`${label}: 全${markers.length}個, ユニークID: ${uniqueCount}個 [${[...uniqueIds].sort().join(',')}]`);
+
+                if (uniqueCount > bestCount()) {
+                    bestResult = { markers: markers, method: label };
+                }
+                updateBestMarkers(markers, label);
+
+                if (uniqueCount >= 4) {
+                    const deduplicated = deduplicateMarkers(markers);
+                    return { markers: deduplicated, processedData: originalData, log: attemptLog };
+                }
+                return getMergedResult();
+            } catch (e) {
+                console.warn(`${label}での検出に失敗:`, e);
+                return null;
+            }
+        }
 
         const scales = [0.5, 0.75, 0.25];
         for (const scale of scales) {
@@ -180,53 +340,158 @@ function detectMarkersWithPreprocessing(img) {
             scaledCtx.drawImage(img, 0, 0, scaledCanvas.width, scaledCanvas.height);
             const scaledData = scaledCtx.getImageData(0, 0, scaledCanvas.width, scaledCanvas.height);
 
-            const preprocessMethods = [
-                { name: `スケール${scale * 100}%`, data: scaledData },
-                { name: `スケール${scale * 100}%+コントラスト`, data: preprocessImage(scaledData) }
+            let scaledContrastData = null;
+            const getScaledContrast = () => scaledContrastData || (scaledContrastData = preprocessImage(scaledData));
+
+            const scaledMethods = [
+                { name: `スケール${scale * 100}%`, getData: () => scaledData },
+                { name: `スケール${scale * 100}%+コントラスト`, getData: getScaledContrast },
             ];
 
-            for (const method of preprocessMethods) {
-                try {
-                    const markers = detector.detect(method.data);
-
-                    // 座標をスケールアップ
-                    markers.forEach(marker => {
-                        marker.corners = marker.corners.map(corner => ({
-                            x: corner.x / scale,
-                            y: corner.y / scale
-                        }));
-                    });
-
-                    const validIds = new Set([0, 1, 2, 3]);
-                    const foundValidMarkers = markers.filter(m => validIds.has(m.id));
-                    const foundIds = foundValidMarkers.length;
-
-                    attemptLog.push(`${method.name}: ID 0-3を${foundIds}個検出`);
-                    console.log(`${method.name}: ${foundIds}個のマーカーを検出`);
-
-                    if (foundIds > bestResult.markers.filter(m => validIds.has(m.id)).length) {
-                        bestResult = { markers: markers, method: method.name };
+            // 適応二値化
+            for (const params of thresholdParams) {
+                for (const method of scaledMethods) {
+                    const label = `${method.name}(k=${params.k},t=${params.t})`;
+                    const result = tryScaledDetect(method.getData(), {
+                        adaptiveKernelSize: params.k,
+                        adaptiveThreshold: params.t
+                    }, label, scale);
+                    if (result) {
+                        console.log(`✓ ${result.mergedFrom ? '統合検出' : label}で全マーカーを検出`);
+                        statusEl.textContent = `✓ スケール${scale * 100}%で全マーカー検出成功`;
+                        return result;
                     }
+                }
+            }
 
-                    if (foundIds >= 4) {
-                        console.log(`✓ ${method.name}で全マーカーを検出`);
-                        statusEl.textContent = `✓ ${method.name}で全マーカー検出成功`;
-                        return { markers: markers, processedData: originalData, log: attemptLog };
-                    }
-                } catch (e) {
-                    console.warn(`${method.name}での検出に失敗:`, e);
+            // グローバル大津二値化
+            for (const method of scaledMethods) {
+                const label = `${method.name}(Otsu)`;
+                const result = tryScaledDetect(method.getData(), { useGlobalThreshold: true }, label, scale);
+                if (result) {
+                    console.log(`✓ ${result.mergedFrom ? '統合検出' : label}で全マーカーを検出`);
+                    statusEl.textContent = `✓ スケール${scale * 100}%+Otsuで全マーカー検出成功`;
+                    return result;
                 }
             }
         }
     }
 
-    console.log(`最良の結果: ${bestResult.method} (${bestResult.markers.length}個)`);
+    // Phase 3: コーナー領域を切り出して個別検出
+    // 画像全体では検出できないマーカーも、コーナー領域だけで処理すると
+    // 二値化が局所的に適用されるため検出できることがある
+    const missingIds = [0, 1, 2, 3].filter(id => !bestMarkerById[id]);
+    if (missingIds.length > 0 && missingIds.length < 4) {
+        console.log(`Phase 3: コーナー検出 - 未検出ID: ${missingIds.join(',')}`);
+        statusEl.textContent = `コーナー領域で未検出マーカーを検索中...`;
+
+        const cornerSize = Math.round(Math.min(img.width, img.height) * 0.35);
+        // ID→コーナー位置のマッピング（ID 0=左上, 1=右上, 2=右下, 3=左下）
+        const cornerPositions = [
+            { id: 0, name: '左上', x: 0, y: 0 },
+            { id: 1, name: '右上', x: img.width - cornerSize, y: 0 },
+            { id: 2, name: '右下', x: img.width - cornerSize, y: img.height - cornerSize },
+            { id: 3, name: '左下', x: 0, y: img.height - cornerSize },
+        ];
+
+        // コーナー検出の試行共通関数
+        function tryCornerDetect(cornerData, detectOptions, label, corner) {
+            try {
+                const markers = detector.detect(cornerData, detectOptions);
+
+                // 座標をフル画像の座標系に変換
+                markers.forEach(marker => {
+                    marker.corners = marker.corners.map(c => ({
+                        x: c.x + corner.x,
+                        y: c.y + corner.y
+                    }));
+                });
+
+                const foundTarget = markers.filter(m => m.id === corner.id);
+                if (foundTarget.length > 0) {
+                    attemptLog.push(`${label}: ID ${corner.id}を検出!`);
+                    console.log(`✓ ${label}でID ${corner.id}を検出`);
+                    updateBestMarkers(markers, label);
+                    return true; // 発見
+                }
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        for (const corner of cornerPositions) {
+            if (bestMarkerById[corner.id]) continue; // すでに検出済み
+
+            const cornerCanvas = document.createElement('canvas');
+            cornerCanvas.width = cornerSize;
+            cornerCanvas.height = cornerSize;
+            const cornerCtx = cornerCanvas.getContext('2d');
+            cornerCtx.drawImage(img, corner.x, corner.y, cornerSize, cornerSize, 0, 0, cornerSize, cornerSize);
+            const cornerData = cornerCtx.getImageData(0, 0, cornerSize, cornerSize);
+
+            // コーナー画像に前処理を適用
+            const cornerMethods = [
+                { name: `コーナー${corner.name}`, data: cornerData },
+                { name: `コーナー${corner.name}+コントラスト`, data: preprocessImage(cornerData) },
+                { name: `コーナー${corner.name}+ブラー+コントラスト`, data: preprocessImage(blurImage(cornerData, 1)) },
+            ];
+
+            // 適応二値化で試行
+            let found = false;
+            for (const params of thresholdParams) {
+                for (const method of cornerMethods) {
+                    const label = `${method.name}(k=${params.k},t=${params.t})`;
+                    if (tryCornerDetect(method.data, {
+                        adaptiveKernelSize: params.k,
+                        adaptiveThreshold: params.t
+                    }, label, corner)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+
+            // グローバル大津二値化で試行
+            if (!found) {
+                for (const method of cornerMethods) {
+                    const label = `${method.name}(Otsu)`;
+                    if (tryCornerDetect(method.data, { useGlobalThreshold: true }, label, corner)) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            // 統合結果チェック
+            const merged = getMergedResult();
+            if (merged) {
+                console.log(`✓ 統合検出で全マーカーを検出 (${merged.mergedFrom.join(' + ')})`);
+                statusEl.textContent = `✓ 統合検出で全マーカー検出成功`;
+                return merged;
+            }
+        }
+
+        // Phase 3 後の最終統合チェック
+        const merged = getMergedResult();
+        if (merged) {
+            console.log(`✓ コーナー検出後の統合で全マーカーを検出`);
+            statusEl.textContent = `✓ 統合検出で全マーカー検出成功`;
+            return merged;
+        }
+    }
+
+    const foundSummary = Object.keys(bestMarkerById).map(Number).sort().join(',');
+    console.log(`最良の結果: ${bestResult.method} (${bestResult.markers.length}個), 統合検出ID: [${foundSummary}]`);
     console.log('検出試行ログ:', attemptLog);
     return { markers: bestResult.markers, processedData: originalData, log: attemptLog };
 }
 
-document.getElementById('imageInput').addEventListener('change', function(e) {
-    selectedFiles = Array.from(e.target.files);
+function handleFiles(files) {
+    // 画像ファイルのみフィルタリング
+    const imageExtensions = /\.(jpe?g|png|gif|bmp|webp|tiff?)$/i;
+    selectedFiles = Array.from(files).filter(f => imageExtensions.test(f.name));
     processedResults = [];
 
     // ファイルリストを更新
@@ -256,6 +521,14 @@ document.getElementById('imageInput').addEventListener('change', function(e) {
         };
         reader.readAsDataURL(selectedFiles[0]);
     }
+}
+
+document.getElementById('imageInput').addEventListener('change', function(e) {
+    handleFiles(e.target.files);
+});
+
+document.getElementById('folderInput').addEventListener('change', function(e) {
+    handleFiles(e.target.files);
 });
 
 function reprocess() {
@@ -360,7 +633,7 @@ function processImage(img) {
 
         const templateMarkerSizeMm = 20;
         const mmToPx = markerSizePx / templateMarkerSizeMm;
-        const insetPx = insetMm * mmToPx;
+        const insetPx = -insetMm * mmToPx;
 
         // 画像スケールを取得（テンプレートと同じ値）
         const imageScale = parseFloat(document.getElementById('imageScale').value) / 100;
@@ -695,6 +968,223 @@ function isProtectedColor(r, g, b, protectedColors) {
     return false;
 }
 
+// 分離可能ダイレーション（膨張）
+function dilateArray(arr, width, height, radius) {
+    const total = width * height;
+    const dilatedH = new Uint8Array(total);
+    for (let y = 0; y < height; y++) {
+        const row = y * width;
+        let last = -radius - 1;
+        for (let x = 0; x < width; x++) {
+            if (arr[row + x]) last = x;
+            if (x - last <= radius) dilatedH[row + x] = 1;
+        }
+        last = width + radius + 1;
+        for (let x = width - 1; x >= 0; x--) {
+            if (arr[row + x]) last = x;
+            if (last - x <= radius) dilatedH[row + x] = 1;
+        }
+    }
+    const dilated = new Uint8Array(total);
+    for (let x = 0; x < width; x++) {
+        let last = -radius - 1;
+        for (let y = 0; y < height; y++) {
+            if (dilatedH[y * width + x]) last = y;
+            if (y - last <= radius) dilated[y * width + x] = 1;
+        }
+        last = height + radius + 1;
+        for (let y = height - 1; y >= 0; y--) {
+            if (dilatedH[y * width + x]) last = y;
+            if (last - y <= radius) dilated[y * width + x] = 1;
+        }
+    }
+    return dilated;
+}
+
+// 背景ノイズ除去（前景マスクにモルフォロジカルオープニングを適用）
+// 小さな前景スペック（ノイズ）を収縮で消し、膨張で本来の前景を復元
+function denoiseBackground(maskData, width, height, radius) {
+    if (radius <= 0) return;
+    const total = width * height;
+
+    // 前景フラグ抽出 (1=前景/黒, 0=背景/白)
+    const fg = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+        fg[i] = maskData.data[i * 4] === 0 ? 1 : 0;
+    }
+
+    // オープニング: 収縮 → 膨張
+    const eroded = erodeArray(fg, width, height, radius);
+    const opened = dilateArray(eroded, width, height, radius);
+
+    // マスクに書き戻し
+    for (let i = 0; i < total; i++) {
+        const val = opened[i] ? 0 : 255;
+        maskData.data[i * 4] = val;
+        maskData.data[i * 4 + 1] = val;
+        maskData.data[i * 4 + 2] = val;
+    }
+
+    const removed = fg.reduce((s, v) => s + v, 0) - opened.reduce((s, v) => s + v, 0);
+    console.log(`ノイズ除去: ${removed}ピクセルの前景ノイズを除去 (半径${radius}px)`);
+}
+
+// Uint8Array上でBFS: 画像の縁から passable=1 のピクセルを通って到達可能な領域を検出
+function floodFillFromBorder(passable, width, height) {
+    const total = width * height;
+    const result = new Uint8Array(total);
+    const queue = new Int32Array(total);
+    let head = 0, tail = 0;
+
+    // 画像の縁にある通過可能ピクセルをシードとして追加
+    for (let x = 0; x < width; x++) {
+        if (passable[x] && !result[x]) {
+            result[x] = 1; queue[tail++] = x;
+        }
+        const b = (height - 1) * width + x;
+        if (passable[b] && !result[b]) {
+            result[b] = 1; queue[tail++] = b;
+        }
+    }
+    for (let y = 1; y < height - 1; y++) {
+        const l = y * width;
+        if (passable[l] && !result[l]) {
+            result[l] = 1; queue[tail++] = l;
+        }
+        const r = y * width + (width - 1);
+        if (passable[r] && !result[r]) {
+            result[r] = 1; queue[tail++] = r;
+        }
+    }
+
+    while (head < tail) {
+        const idx = queue[head++];
+        const x = idx % width;
+        const y = (idx - x) / width;
+        if (x > 0)          { const n = idx - 1;     if (passable[n] && !result[n]) { result[n] = 1; queue[tail++] = n; } }
+        if (x < width - 1)  { const n = idx + 1;     if (passable[n] && !result[n]) { result[n] = 1; queue[tail++] = n; } }
+        if (y > 0)          { const n = idx - width;  if (passable[n] && !result[n]) { result[n] = 1; queue[tail++] = n; } }
+        if (y < height - 1) { const n = idx + width;  if (passable[n] && !result[n]) { result[n] = 1; queue[tail++] = n; } }
+    }
+
+    return result;
+}
+
+// 分離可能エロージョン（収縮）: 非対象ピクセルから距離 radius 以内の対象ピクセルを除去
+function erodeArray(arr, width, height, radius) {
+    const total = width * height;
+
+    // 水平エロージョン
+    const erodedH = new Uint8Array(total);
+    for (let y = 0; y < height; y++) {
+        const row = y * width;
+        // 左→右: 最後の非対象ピクセル位置を追跡
+        let lastZero = -radius - 1;
+        for (let x = 0; x < width; x++) {
+            if (!arr[row + x]) lastZero = x;
+            if (x - lastZero > radius) erodedH[row + x] = 1;
+        }
+        // 右→左: 両方向で生存したピクセルのみ残す
+        lastZero = width + radius;
+        for (let x = width - 1; x >= 0; x--) {
+            if (!arr[row + x]) lastZero = x;
+            if (!(lastZero - x > radius)) erodedH[row + x] = 0;
+        }
+    }
+
+    // 垂直エロージョン
+    const eroded = new Uint8Array(total);
+    for (let x = 0; x < width; x++) {
+        let lastZero = -radius - 1;
+        for (let y = 0; y < height; y++) {
+            if (!erodedH[y * width + x]) lastZero = y;
+            if (y - lastZero > radius) eroded[y * width + x] = 1;
+        }
+        lastZero = height + radius;
+        for (let y = height - 1; y >= 0; y--) {
+            if (!erodedH[y * width + x]) lastZero = y;
+            if (!(lastZero - y > radius)) eroded[y * width + x] = 0;
+        }
+    }
+
+    return eroded;
+}
+
+// 外部背景を検出（ギャップを閉じる処理付き）
+// 1. フラッドフィルで初期外部を検出
+// 2. 外部をエロージョンして細い漏れ（ギャップ経由の侵入）を断ち切る
+// 3. 縁からエロージョン済み外部を通って再フラッドフィル → 漏れた内部は到達不可に
+function findExteriorPixels(maskData, width, height, gapCloseRadius) {
+    const total = width * height;
+
+    // 背景マスクを抽出 (1=背景, 0=前景)
+    const isBackground = new Uint8Array(total);
+    for (let i = 0; i < total; i++) {
+        isBackground[i] = maskData.data[i * 4] === 255 ? 1 : 0;
+    }
+
+    // Step 1: 縁から背景を通ってフラッドフィル → 初期外部
+    const initialExterior = floodFillFromBorder(isBackground, width, height);
+
+    if (gapCloseRadius <= 0) {
+        console.log('ギャップ閉じ無効 - 初期外部をそのまま使用');
+        return initialExterior;
+    }
+
+    // Step 2: 外部をエロージョン → 細い通路（ギャップからの漏れ）を除去
+    const erodedExterior = erodeArray(initialExterior, width, height, gapCloseRadius);
+
+    // Step 3: 縁からエロージョン済み外部を通って再フラッドフィル
+    // → ギャップ経由で漏れた内部領域には到達できない
+    const finalExterior = floodFillFromBorder(erodedExterior, width, height);
+
+    // Step 4: 最終外部をダイレーションして、エロージョンで縮んだ外部縁を復元
+    // （外部の端が白になるのを防ぐ）
+    const restoredExterior = dilateToOriginal(finalExterior, isBackground, width, height, gapCloseRadius);
+
+    const extCount = restoredExterior.reduce((s, v) => s + v, 0);
+    console.log(`外部背景ピクセル: ${extCount}/${total} (${(extCount / total * 100).toFixed(1)}%), ギャップ閉じ半径: ${gapCloseRadius}px`);
+    return restoredExterior;
+}
+
+// エロージョンで縮んだ外部を元の背景範囲内でダイレーションして復元
+function dilateToOriginal(exterior, isBackground, width, height, radius) {
+    const total = width * height;
+
+    // 水平ダイレーション
+    const dilatedH = new Uint8Array(total);
+    for (let y = 0; y < height; y++) {
+        const row = y * width;
+        let lastExt = -radius - 1;
+        for (let x = 0; x < width; x++) {
+            if (exterior[row + x]) lastExt = x;
+            if (x - lastExt <= radius && isBackground[row + x]) dilatedH[row + x] = 1;
+        }
+        lastExt = width + radius + 1;
+        for (let x = width - 1; x >= 0; x--) {
+            if (exterior[row + x]) lastExt = x;
+            if (lastExt - x <= radius && isBackground[row + x]) dilatedH[row + x] = 1;
+        }
+    }
+
+    // 垂直ダイレーション
+    const dilated = new Uint8Array(total);
+    for (let x = 0; x < width; x++) {
+        let lastExt = -radius - 1;
+        for (let y = 0; y < height; y++) {
+            if (dilatedH[y * width + x]) lastExt = y;
+            if (y - lastExt <= radius && isBackground[y * width + x]) dilated[y * width + x] = 1;
+        }
+        lastExt = height + radius + 1;
+        for (let y = height - 1; y >= 0; y--) {
+            if (dilatedH[y * width + x]) lastExt = y;
+            if (lastExt - y <= radius && isBackground[y * width + x]) dilated[y * width + x] = 1;
+        }
+    }
+
+    return dilated;
+}
+
 // カラー画像処理（背景色を自動検出して透明化）
 function processColorImage(imageData) {
     const width = imageData.width;
@@ -763,6 +1253,10 @@ function processColorImage(imageData) {
         }
     }
 
+    // 背景ノイズ除去
+    const denoiseRadius = parseInt(document.getElementById('denoiseRadius').value);
+    denoiseBackground(maskData, width, height, denoiseRadius);
+
     // マスクを表示
     const maskCanvas = document.getElementById('maskCanvas');
     maskCanvas.width = width;
@@ -770,18 +1264,29 @@ function processColorImage(imageData) {
     const maskCtx = maskCanvas.getContext('2d');
     maskCtx.putImageData(maskData, 0, 0);
 
-    // 4. カラーアルファ画像を生成
+    // 4. 外部背景を検出（ギャップ閉じ処理付き）
+    const gapCloseRadius = parseInt(document.getElementById('gapCloseRadius').value);
+    const isExterior = findExteriorPixels(maskData, width, height, gapCloseRadius);
+
+    // 5. カラーアルファ画像を生成
     const alphaData = new ImageData(width, height);
 
     for (let i = 0; i < imageData.data.length; i += 4) {
+        const pixelIndex = i / 4;
         const isMasked = maskData.data[i] === 255;
 
-        if (isMasked) {
-            // 背景 → 透明
+        if (isMasked && isExterior[pixelIndex]) {
+            // 外部背景 → 透明
             alphaData.data[i] = 0;
             alphaData.data[i + 1] = 0;
             alphaData.data[i + 2] = 0;
             alphaData.data[i + 3] = 0;
+        } else if (isMasked && !isExterior[pixelIndex]) {
+            // 内部背景（閉じた領域内） → 白
+            alphaData.data[i] = 255;
+            alphaData.data[i + 1] = 255;
+            alphaData.data[i + 2] = 255;
+            alphaData.data[i + 3] = 255;
         } else {
             // 前景 → カラーを保持
             alphaData.data[i] = imageData.data[i];
@@ -942,10 +1447,10 @@ function downloadPng() {
         link.href = url;
 
         // ファイル名を取得
-        let filename = 'color-alpha.png';
+        let filename = 'Alpha_image.png';
         if (selectedFiles.length > 0) {
             const originalName = selectedFiles[0].name.replace(/\.[^/.]+$/, '');
-            filename = `${originalName}-color.png`;
+            filename = `Alpha_${originalName}.png`;
         }
 
         link.download = filename;
@@ -1022,18 +1527,27 @@ async function downloadAllResults() {
 
     const statusEl = document.getElementById('status');
     statusEl.className = 'status loading';
+    statusEl.textContent = 'ZIPファイルを作成中...';
+
+    const zip = new JSZip();
 
     for (let i = 0; i < processedResults.length; i++) {
         const result = processedResults[i];
-        const link = document.createElement('a');
-        link.download = `${result.name}-color.png`;
-        link.href = URL.createObjectURL(result.blob);
-        link.click();
-
-        await new Promise(resolve => setTimeout(resolve, 300));
-        statusEl.textContent = `ダウンロード中... ${i + 1}/${processedResults.length}`;
+        zip.file(`Alpha_${result.name}.png`, result.blob);
+        statusEl.textContent = `ZIPに追加中... ${i + 1}/${processedResults.length}`;
     }
 
+    const zipBlob = await zip.generateAsync({ type: 'blob' }, function(metadata) {
+        statusEl.textContent = `ZIP生成中... ${Math.round(metadata.percent)}%`;
+    });
+
+    const url = URL.createObjectURL(zipBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'Alpha_images.zip';
+    link.click();
+    URL.revokeObjectURL(url);
+
     statusEl.className = 'status success';
-    statusEl.textContent = `✓ ${processedResults.length}個のファイルをダウンロードしました`;
+    statusEl.textContent = `✓ ${processedResults.length}個のファイルをZIPでダウンロードしました`;
 }

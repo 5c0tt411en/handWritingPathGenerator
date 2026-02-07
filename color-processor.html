@@ -111,6 +111,8 @@
     <div class="controls">
         <h3>1. スキャン画像を選択</h3>
         <input type="file" id="imageInput" accept="image/*" multiple>
+        <button type="button" onclick="document.getElementById('folderInput').click()" style="margin-left: 10px;">フォルダを選択</button>
+        <input type="file" id="folderInput" webkitdirectory style="display: none;">
 
         <h3>2. マーカー検出設定</h3>
         <p style="font-size: 12px; color: #666;">
@@ -121,7 +123,7 @@
         <h3>3. 処理設定</h3>
         <label>
             マーカー余白: <span id="insetValue">3.5</span> mm
-            <input type="range" id="insetMargin" min="0" max="10" step="0.5" value="3.5" oninput="document.getElementById('insetValue').textContent = this.value; reprocess();">
+            <input type="range" id="insetMargin" min="-10" max="10" step="0.5" value="3.5" oninput="document.getElementById('insetValue').textContent = this.value; reprocess();">
             <small>（マーカーから描画枠までの余白）</small>
         </label>
         <label>
@@ -130,14 +132,24 @@
             <small>（テンプレート生成時と同じ値に設定してください）</small>
         </label>
         <label>
-            背景色差の閾値: <span id="thresholdValue">50</span>
-            <input type="range" id="threshold" min="10" max="150" value="50" oninput="document.getElementById('thresholdValue').textContent = this.value; reprocess();">
+            背景色差の閾値: <span id="thresholdValue">20</span>
+            <input type="range" id="threshold" min="1" max="150" value="20" oninput="document.getElementById('thresholdValue').textContent = this.value; reprocess();">
             <small>（高いほど、背景色に近い色を広く透明にします）</small>
         </label>
         <label>
             エッジ保護: <span id="edgeProtectValue">30</span>
             <input type="range" id="edgeProtect" min="0" max="100" value="30" oninput="document.getElementById('edgeProtectValue').textContent = this.value; reprocess();">
             <small>（黒い輪郭線の周辺を保護して色を残します）</small>
+        </label>
+        <label>
+            ノイズ除去: <span id="denoiseRadiusValue">6</span> px
+            <input type="range" id="denoiseRadius" min="0" max="10" step="1" value="6" oninput="document.getElementById('denoiseRadiusValue').textContent = this.value; reprocess();">
+            <small>（背景の小さなゴミ・ノイズを除去。大きいほど強力ですが細い線も消えます）</small>
+        </label>
+        <label>
+            ギャップ閉じ半径: <span id="gapCloseRadiusValue">8</span> px
+            <input type="range" id="gapCloseRadius" min="0" max="50" step="1" value="8" oninput="document.getElementById('gapCloseRadiusValue').textContent = this.value; reprocess();">
+            <small>（閉じた領域の判定強度。大きいほど小さな隙間があっても閉じた領域として扱います）</small>
         </label>
 
         <h4 style="margin-top: 15px;">保護色設定</h4>
@@ -176,7 +188,7 @@
         <h3>一括処理</h3>
         <p>複数ファイルを選択した場合、一括で処理してダウンロードできます。</p>
         <button onclick="processAllFiles()" id="batchProcessBtn" disabled>全ファイルを処理</button>
-        <button onclick="downloadAllResults()" id="downloadAllBtn" disabled>全結果をダウンロード</button>
+        <button onclick="downloadAllResults()" id="downloadAllBtn" disabled>全結果をZIPダウンロード</button>
         <div id="fileList" class="file-list"></div>
     </div>
 
@@ -203,6 +215,7 @@
         </div>
     </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="cv.js"></script>
     <script src="aruco2.js"></script>
     <script src="color-processor.js"></script>

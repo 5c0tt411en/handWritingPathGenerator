@@ -261,9 +261,19 @@ AR.Detector.prototype.detectMJPEGStream = function (chunk) {
   }
 };
 
-AR.Detector.prototype.detect = function (image) {
+AR.Detector.prototype.detect = function (image, options) {
+  options = options || {};
+  var kernelSize = options.adaptiveKernelSize || 2;
+  var threshold = options.adaptiveThreshold || 7;
+
   CV.grayscale(image, this.grey);
-  CV.adaptiveThreshold(this.grey, this.thres, 2, 7);
+
+  if (options.useGlobalThreshold) {
+    // グローバル大津二値化: 大きな均一黒領域を持つマーカー（ID 0等）に有効
+    CV.threshold(this.grey, this.thres, CV.otsu(this.grey));
+  } else {
+    CV.adaptiveThreshold(this.grey, this.thres, kernelSize, threshold);
+  }
 
   this.contours = CV.findContours(this.thres, this.binary);
   //Scale Fix: https://stackoverflow.com/questions/35936397/marker-detection-on-paper-sheet-using-javascript
